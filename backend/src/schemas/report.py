@@ -15,9 +15,15 @@ class ReportRow(BaseModel):
     stock: str | None
     f1_score: float | None
     status: str
+    run_id: int | None = None
+    execution_owner: str | None = None
+    result_complete: bool = True
+    pending_reason: str | None = None
 
 
 class ReportOut(BaseModel):
     generated_at: str
     rows: list[ReportRow]
     avg_f1: float | None
+    complete_rows: int = 0
+    pending_rows: int = 0

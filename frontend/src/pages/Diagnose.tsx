@@ -46,8 +46,10 @@ export default function Diagnose() {
       }
       const runs = await runsApi.list(templateData.site_id);
       const forTemplate = runs.items.filter((run) => run.snapshot_id === snapshotId);
-      setLatestRun(forTemplate[0] ?? null);
-      setBeforeRun(forTemplate[1] ?? null);
+      // F1 只参考完整批次，避免把执行中 / 接管的半成品当成自愈效果
+      const complete = forTemplate.filter((run) => run.result_complete);
+      setLatestRun(complete[0] ?? null);
+      setBeforeRun(complete[1] ?? null);
     } catch (err) {
       setError(errorMessage((err as { payload?: unknown }).payload, '诊断加载失败'));
     }

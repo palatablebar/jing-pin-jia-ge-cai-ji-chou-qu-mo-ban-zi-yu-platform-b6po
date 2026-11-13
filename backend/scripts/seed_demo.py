@@ -1,7 +1,8 @@
-"""幂等 seed：3 账号 / 6 站点 / 8 模板（47 条字段规则）/ 12 快照 / 12 批次 / 4 告警。
+"""幂等 seed：3 账号 / 6 站点 / 8 模板（47 条字段规则）/ 12 快照 / 13 批次 / 4 告警。
 
 自然键 upsert：users.email、sites.domain、templates(site,name,version)、
-snapshots(site,dom_hash)、runs.seed_key、alerts(site,snapshot)。重复执行不新增、不覆盖用户修改。
+snapshots(site,dom_hash)、runs.seed_key（= batch_key 由 (template, snapshot) 派生）、
+alerts(site,snapshot)。重复执行不新增、不覆盖用户修改。
 """
 from __future__ import annotations
 
@@ -12,18 +13,20 @@ from sqlalchemy import func, select
 
 from src.config.database import session_scope
 from src.config.settings import settings
-from src.constants.enums import AlertStatus, SiteStatus, TemplateStatus
+from src.constants.enums import AlertStatus, AttemptStatus, RunStatus, SiteStatus, TemplateStatus
 from src.models.alert import DriftAlert
 from src.models.audit import AuditLog
 from src.models.run import ExtractionRun
+from src.models.run_attempt import ExtractionRunAttempt
 from src.models.site import Site
 from src.models.snapshot import Snapshot
 from src.models.template import ExtractionTemplate
 from src.models.user import User
 from scripts.build_snapshots import SITES, SiteSpec, build_snapshot_html, snapshot_url
 from scripts.demo_config import DRAFT_RULES, field_rules_for
-from src.services import run_service, snapshot_service
+from src.services import dom_html, extraction_service, run_service, snapshot_service
 from src.utils.security import hash_password
+from src.utils.timeutil import utcnow
 
 DEMO_PASSWORD = "Demo@2026"
 DEMO_USERS = [
@@ -133,6 +136,59 @@ def ensure_run(db, template: ExtractionTemplate, snapshot: Snapshot, seed_key: s
     )
 
 
+def ensure_interrupted_run(db, template: ExtractionTemplate, snapshot: Snapshot, seed_key: str,
+                           triggered_by: str, done_fields: int = 3) -> ExtractionRun:
+    """演示「实例失联」：落一条带过期租约的执行中批次。
+
+    真实部署里这由 worker 执行到一半崩溃产生；worker beat 的 sweep 任务会发现它，
+    标记为 interrupted 并由存活实例接管续跑。
+    """
+    run = db.scalar(select(ExtractionRun).where(ExtractionRun.seed_key == seed_key))
+    if run is not None:
+        return run
+    rules = template.field_rules or []
+    root = dom_html.parse_html(snapshot.html)
+    results = [extraction_service.extract_field(root, rule) for rule in rules[:done_fields]]
+    owner = "worker@crawler-2:lost-7f91"
+    now = utcnow()
+    run = ExtractionRun(
+        template_id=template.id,
+        template_version=template.version,
+        snapshot_id=snapshot.id,
+        batch_key=run_service.batch_key_for(template.id, snapshot.id),
+        status=RunStatus.RUNNING.value,
+        field_results=results,
+        triggered_by=triggered_by,
+        seed_key=seed_key,
+        started_at=now - timedelta(minutes=6),
+        execution_owner=owner,
+        lease_token=1,
+        lease_expires_at=now - timedelta(seconds=5),
+        heartbeat_at=now - timedelta(minutes=3),
+        progress_done=len(results),
+        progress_total=len(rules),
+        result_complete=False,
+        attempt_count=1,
+    )
+    db.add(run)
+    db.flush()
+    db.add(ExtractionRunAttempt(
+        run_id=run.id,
+        attempt_no=1,
+        lease_token=1,
+        instance_id=owner,
+        status=AttemptStatus.INTERRUPTED.value,
+        progress_done=len(results),
+        progress_total=len(rules),
+        message="实例失联：worker@crawler-2 心跳超时",
+        started_at=now - timedelta(minutes=6),
+        heartbeat_at=now - timedelta(minutes=3),
+        finished_at=now - timedelta(minutes=3),
+    ))
+    db.flush()
+    return run
+
+
 def ensure_alert(db, snapshot: Snapshot, template: ExtractionTemplate) -> DriftAlert | None:
     existing = db.scalar(
         select(DriftAlert).where(
@@ -232,6 +288,9 @@ def seed_all() -> str:
                    "seed:run:doudian:drifted", "schedule:06:00")
         ensure_run(db, templates["xhsgoods:v1"], snapshots["xhsgoods"]["baseline"],
                    "seed:run:xhsgoods:baseline", "analyst@pricelens.io")
+        # 13 条：演示「实例失联」——心跳超时的执行中批次，等待新实例接管续跑
+        ensure_interrupted_run(db, templates["xhsgoods:v1"], snapshots["xhsgoods"]["new"],
+                               "seed:run:xhsgoods:interrupted", "schedule:06:00", done_fields=3)
 
         # 4 条告警：抖动阈值触发（high2 / medium1 / low1），诊断与候选均为真算
         for key in ("jingxuan", "taohuasuan", "pinyigou", "suningkuaigou"):

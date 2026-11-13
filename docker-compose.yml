@@ -55,6 +55,8 @@ services:
       SEED_DEMO: ${SEED_DEMO}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE}
       RATE_LIMIT_RUNS_PER_MINUTE: ${RATE_LIMIT_RUNS_PER_MINUTE}
+      RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-30}
+      RUN_STEP_DELAY_MS: ${RUN_STEP_DELAY_MS:-0}
     ports:
       - "${BACKEND_PORT:-19235}:8000"
     depends_on:
@@ -85,6 +87,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       REDIS_URL: ${REDIS_URL}
       SEED_DEMO: "false"
+      RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-30}
+      RUN_STEP_DELAY_MS: ${RUN_STEP_DELAY_MS:-0}
     depends_on:
       db:
         condition: service_healthy

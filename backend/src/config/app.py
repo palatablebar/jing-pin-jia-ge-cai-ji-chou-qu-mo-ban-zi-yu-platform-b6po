@@ -20,9 +20,11 @@ logger = logging.getLogger("pricelens.app")
 
 def _bootstrap_database() -> None:
     from src.models import Base  # noqa: WPS433 - 延迟导入避免循环
+    from src.config.schema_upgrade import apply_schema_upgrades
 
     wait_for_db()
     Base.metadata.create_all(bind=engine)
+    apply_schema_upgrades(engine)
 
 
 def _run_seed_once() -> None:

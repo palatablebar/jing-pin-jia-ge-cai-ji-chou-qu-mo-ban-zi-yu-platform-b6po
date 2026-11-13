@@ -11,10 +11,11 @@ from src.models.site import Site  # noqa: E402
 from src.models.template import ExtractionTemplate  # noqa: E402
 from src.models.snapshot import Snapshot  # noqa: E402
 from src.models.run import ExtractionRun  # noqa: E402
+from src.models.run_attempt import ExtractionRunAttempt  # noqa: E402
 from src.models.alert import DriftAlert  # noqa: E402
 from src.models.audit import AuditLog  # noqa: E402
 
 __all__ = [
     "Base", "User", "Site", "ExtractionTemplate", "Snapshot",
-    "ExtractionRun", "DriftAlert", "AuditLog",
+    "ExtractionRun", "ExtractionRunAttempt", "DriftAlert", "AuditLog",
 ]

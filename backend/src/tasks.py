@@ -1,4 +1,4 @@
-"""Celery 任务：worker 消费（心跳、全站巡检、异步批次）。"""
+"""Celery 任务：worker 消费（心跳、全站巡检、批次执行、中断扫描与接管）。"""
 from __future__ import annotations
 
 import time
@@ -64,5 +64,30 @@ def scan_all_sites() -> dict:
 
 @celery_app.task(name="pricelens.run_extraction")
 def run_extraction(run_id: int) -> dict:
-    """异步批次（API 默认同步执行，保留异步入口供定时任务使用）。"""
-    return {"run_id": run_id, "status": "queued"}
+    """执行指定批次；租约被占用则让出，过期/中断则由本 worker 接管续跑。"""
+    from src.config.database import session_scope
+    from src.services import run_service
+
+    with session_scope() as db:
+        run = run_service.get_run(db, run_id)
+        if run is None:
+            return {"run_id": run_id, "status": "not_found"}
+        try:
+            outcome = run_service.execute_batch(db, run, run_service.instance_id("worker"))
+        except run_service.BatchBusy:
+            return {"run_id": run_id, "status": "busy"}
+        return {"run_id": run_id, **outcome}
+
+
+@celery_app.task(name="pricelens.sweep_stale_runs")
+def sweep_stale_runs() -> dict:
+    """把心跳超时的执行中批次标为中断，并立即由当前 worker 实例接管续跑。"""
+    from src.config.database import session_scope
+    from src.services import run_service
+
+    with session_scope() as db:
+        stale = run_service.sweep_stale_batches(db)
+    resumed: list[dict] = []
+    for item in stale:
+        resumed.append(run_extraction(item["run_id"]))
+    return {"stale": len(stale), "resumed": resumed}

@@ -11,7 +11,8 @@ export interface UserInfo {
 export type Severity = 'high' | 'medium' | 'low' | 'none';
 export type AlertStatus = 'open' | 'accepted' | 'dismissed';
 export type TemplateStatus = 'draft' | 'active' | 'deprecated';
-export type RunStatus = 'queued' | 'running' | 'success' | 'failed';
+export type RunStatus = 'queued' | 'running' | 'interrupted' | 'success' | 'failed';
+export type AttemptStatus = 'running' | 'succeeded' | 'failed' | 'interrupted' | 'superseded' | 'rejected';
 export type FieldStatus = 'hit' | 'wrong' | 'miss';
 
 export interface TemplateBrief {
@@ -176,6 +177,21 @@ export interface Alert {
   suggested_patch: SuggestedPatch;
 }
 
+export interface RunAttempt {
+  id: number;
+  attempt_no: number;
+  lease_token: number;
+  instance_id: string;
+  status: AttemptStatus;
+  progress_done: number;
+  progress_total: number;
+  resumed_from: number | null;
+  message: string | null;
+  started_at: string | null;
+  heartbeat_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Run {
   id: number;
   template_id: number;
@@ -195,6 +211,23 @@ export interface Run {
   error_message: string | null;
   created_at: string;
   field_results: FieldResult[];
+  execution_owner: string | null;
+  lease_token: number;
+  lease_active: boolean;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  progress_done: number;
+  progress_total: number;
+  result_complete: boolean;
+  attempt_count: number;
+  attempts?: RunAttempt[];
+}
+
+export interface RunAction extends Run {
+  created: boolean;
+  reused: boolean;
+  takeover: boolean;
+  outcome: string | null;
 }
 
 export interface TrendPoint {
@@ -218,12 +251,18 @@ export interface ReportRow {
   stock: string | null;
   f1_score: number | null;
   status: RunStatus;
+  run_id: number | null;
+  execution_owner: string | null;
+  result_complete: boolean;
+  pending_reason: string | null;
 }
 
 export interface Report {
   generated_at: string;
   rows: ReportRow[];
   avg_f1: number | null;
+  complete_rows: number;
+  pending_rows: number;
 }
 
 export interface AuditLog {

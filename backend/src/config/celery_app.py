@@ -28,8 +28,11 @@ celery_app.conf.update(
 celery_app.conf.beat_schedule = {
     "pricelens-heartbeat": {"task": "pricelens.heartbeat", "schedule": 20.0},
     "pricelens-site-scan": {"task": "pricelens.scan_all_sites", "schedule": crontab(minute="*/30")},
+    # 每 20s 扫描一次租约过期的执行中批次，自动标记中断并接管续跑
+    "pricelens-sweep-stale-runs": {"task": "pricelens.sweep_stale_runs", "schedule": 20.0},
 }
 
 TASK_RUN_EXTRACTION = "pricelens.run_extraction"
 TASK_SCAN_SITE = "pricelens.scan_site"
 TASK_SCAN_ALL = "pricelens.scan_all_sites"
+TASK_SWEEP_STALE = "pricelens.sweep_stale_runs"

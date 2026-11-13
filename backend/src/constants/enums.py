@@ -30,8 +30,18 @@ class TemplateStatus(str, Enum):
 class RunStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"   # 实例失联，租约过期，等待新实例接管续跑
     SUCCESS = "success"
     FAILED = "failed"
+
+
+class AttemptStatus(str, Enum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"   # 心跳超时被标记中断
+    SUPERSEDED = "superseded"     # 租约被新实例接管
+    REJECTED = "rejected"         # 旧实例晚到写入被围栏拒绝
 
 
 class FieldStatus(str, Enum):

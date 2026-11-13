@@ -2,7 +2,7 @@ import { useAsync } from '../hooks/useAsync';
 import { reportsApi } from '../api/reports';
 import StatusPill from '../components/common/StatusPill';
 import { fmtDateTime } from '../utils/format';
-import { RUN_STATUS_LABEL } from '../constants/enums';
+import { PENDING_REASON_LABEL, RUN_STATUS_LABEL } from '../constants/enums';
 import { uiStore } from '../stores/uiStore';
 
 export default function ClientReport() {
@@ -37,7 +37,7 @@ export default function ClientReport() {
           <div className="kicker">Daily / 客户只读</div>
           <h1>品牌客户价格日报</h1>
           <p className="sub">
-            只读视图 · 生成于 {fmtDateTime(data?.generated_at)} · 6 个站点最新成功批次的字段快照
+            只读视图 · 生成于 {fmtDateTime(data?.generated_at)} · 仅采纳已完整落库的批次，执行中半成品不进入日报
           </p>
         </div>
         <div className="head-actions">
@@ -58,10 +58,10 @@ export default function ClientReport() {
           <div className="v accent">{data?.avg_f1?.toFixed(3) ?? '—'}</div>
         </div>
         <div className="metric">
-          <div className="k">成功批次</div>
+          <div className="k">完整结果</div>
           <div className="v">
-            {rows.filter((row) => row.status === 'success').length}
-            <small> / {rows.length}</small>
+            {data?.complete_rows ?? rows.filter((row) => row.result_complete).length}
+            <small> / {rows.length} 站点</small>
           </div>
         </div>
         <div className="metric">
@@ -76,7 +76,10 @@ export default function ClientReport() {
       <div className="panel">
         <div className="panel-head">
           <h2>价格日报</h2>
-          <span className="meta">字段口径：标题 / 标价 / 到手价 / 库存</span>
+          <span className="meta">
+            字段口径：标题 / 标价 / 到手价 / 库存
+            {(data?.pending_rows ?? 0) > 0 ? ` · ${data?.pending_rows} 个站点待补` : ''}
+          </span>
         </div>
         <div className="panel-body" style={{ padding: 0 }}>
           <table className="data">
@@ -91,21 +94,33 @@ export default function ClientReport() {
                 <th>库存</th>
                 <th>F1</th>
                 <th>状态</th>
+                <th>批次归属</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.site_id} data-testid={`report-row-${row.site_id}`}>
+                <tr key={row.site_id} data-testid={`report-row-${row.site_id}`} className={row.result_complete ? undefined : 'pending-row'}>
                   <td>{row.site_name}</td>
                   <td className="mono">{row.domain}</td>
-                  <td className="mono">{row.snapshot_label}</td>
+                  <td className="mono">{row.snapshot_label || '—'}</td>
                   <td className="wrap">{row.title ?? '—'}</td>
                   <td className="num">{row.list_price ?? '—'}</td>
                   <td className="num">{row.promo_price ?? '—'}</td>
                   <td>{row.stock ?? '—'}</td>
                   <td className="num">{row.f1_score?.toFixed(2) ?? '—'}</td>
-                  <td>
-                    <StatusPill tone={row.status} label={RUN_STATUS_LABEL[row.status]} />
+                  <td data-testid={`report-status-${row.site_id}`}>
+                    {row.result_complete ? (
+                      <StatusPill tone={row.status} label={RUN_STATUS_LABEL[row.status]} />
+                    ) : (
+                      <StatusPill tone="interrupted" label={PENDING_REASON_LABEL[row.pending_reason ?? ''] ?? '待补'} />
+                    )}
+                  </td>
+                  <td className="mono wrap" data-testid={`report-owner-${row.site_id}`}>
+                    {row.result_complete
+                      ? `#${row.run_id} · ${row.execution_owner ?? '—'}`
+                      : row.run_id
+                        ? `#${row.run_id} · 未完成`
+                        : '—'}
                   </td>
                 </tr>
               ))}
@@ -115,6 +130,7 @@ export default function ClientReport() {
       </div>
       <p style={{ marginTop: '0.8rem', fontSize: '0.72rem', color: 'var(--ink-soft)' }}>
         客户只读：模板、快照诊断与告警接口对本角色返回 403；导出动作会写入审计日志。
+        只采纳完整批次：批次执行中、被中断或正在被新实例接管时，该站点保留上一份完整结果；若从未有完整结果则留空待补。
       </p>
     </div>
   );

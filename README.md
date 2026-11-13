@@ -10,6 +10,9 @@
   页面 HTML 存快照；抽取商品标题 / 标价 / 促销价 / 券后价 / 库存状态 / 评论数，导出日报。
 - **三个痛点**：① 站点改版后模板静默失效（输出 null 或错位值），第二天日报才发现；② 修模板靠人翻 HTML
   试选择器，单站 40–90 分钟；③ 同一字段多套候选选择器（PC/移动/A-B）无管理，覆盖率不明。
+- **批次执行痛点**：采集实例失联后批次永远停在执行中；手工重提又生成第二份批次，两个实例同时落库导致
+  页面出现两套结果、日报可能采用半成品。本系统用「批次唯一身份 + 执行租约 + 断点续跑 + 晚到结果围栏」
+  保证同一批只有一个有效执行归属，日报只采纳完整结果。
 - **上下游**：上游=品牌客户 SKU 清单 + 站点清单；本系统替代「模板管理 + 快照诊断 + 候选自愈」；
   下游=BI 日报、缺货预警、客户对账。
 
@@ -20,7 +23,7 @@
 | 站点与模板总览 | `/sites` | 左侧竖排站点轨道；模板版本 / 覆盖率 / 告警徽章 / 最近抓取 |
 | 模板编辑台 | `/templates/:id` | 字段规则（7 字段）、候选选择器编辑、右侧快照抽取预览（命中高亮） |
 | 快照诊断 | `/snapshots/:id/diagnose/:templateId` | 漂移评分 + 分项贡献 + 变化子树 top3 + 逐字段命中矩阵 + 候选评分排序 + 一键应用生成 v2 |
-| 抽取批次 | `/runs` | 12+ 批次历史、F1 趋势、批次字段矩阵（与诊断页共用 `FieldHitMatrix`） |
+| 抽取批次 | `/runs` | 13 条批次历史、执行归属 / 接管进度 / 执行时间线、F1 趋势、字段矩阵（与诊断页共用 `FieldHitMatrix`） |
 | 告警队列 | `/alerts` | 高危/关注/观察队列；候选重算、应用；admin 接受/驳回（审计 +2） |
 | 客户日报 | `/client/report` | 品牌客户只读；6 站点价格日报 + CSV 导出（client 访问模板/诊断接口 403） |
 
@@ -37,7 +40,7 @@ seed 会随 backend 启动自动执行一次（`SEED_DEMO=true`），也可手�
 
 ```bash
 docker compose exec -T backend python -m scripts.seed_demo
-# SEED_SUMMARY brand=pricelens sites=6 templates=8 snapshots=12 runs=12 alerts=4 users=3
+# SEED_SUMMARY brand=pricelens sites=6 templates=8 snapshots=12 runs=13 alerts=4 users=3
 ```
 
 收尾：`docker compose down -v --remove-orphans`。
@@ -72,7 +75,8 @@ gb-562/
 │   ├── Dockerfile             # backend 与 worker 共用镜像（worker 覆盖 command）
 │   ├── requirements.txt
 │   ├── scripts/               # seed_demo.py / build_snapshots.py / demo_config.py
-│   ├── migrations/            # 0001_initial.sql baseline DDL + README
+│   ├── migrations/            # 0001_initial.sql baseline + 0002_batch_ownership.sql
+│   ├── tests/                 # pytest：批次归属 / 租约围栏 / 续跑 / 日报完整性
 │   └── src/
 │       ├── config/            # settings / database / celery_app / app
 │       ├── constants/         # enums / roles / limits / error_codes / log_templates
@@ -88,16 +92,69 @@ gb-562/
     └── src/{api,stores,types,components,common,hooks,pages,router,utils,constants,styles}
 ```
 
-## 7. 数据模型（5 核心实体 + 2 支撑）
+## 7. 数据模型（5 核心实体 + 3 支撑）
 
 | 实体 | 关键字段 |
 |---|---|
 | `Site` | name、domain（唯一）、market、robots_policy、qps_limit、status、last_crawled_at |
 | `ExtractionTemplate` | site_id、name、version（(site,name,version) 唯一）、status、field_rules(JSON)、coverage_score、last_verified_at |
 | `Snapshot` | site_id、url、captured_at、html(TEXT)、dom_hash（(site,dom_hash) 唯一）、byte_size、is_baseline |
-| `ExtractionRun` | template_id、snapshot_id、status、field_results(JSON)、hit/missing_fields、f1_score、duration_ms、seed_key（唯一） |
+| `ExtractionRun` | template_id、snapshot_id、**batch_key（唯一 = template:snapshot）**、status、field_results(JSON)、hit/missing_fields、f1_score、duration_ms、seed_key、**execution_owner / lease_token / lease_expires_at / heartbeat_at / progress_done / progress_total / result_complete / attempt_count** |
+| `ExtractionRunAttempt` | run_id、attempt_no、lease_token、instance_id、status(running/succeeded/failed/interrupted/superseded/rejected)、progress、resumed_from、message |
 | `DriftAlert` | site_id、snapshot_id（唯一）、drift_score、severity、diagnosis(JSON)、suggested_patch(JSON)、status、handled_by |
 | `User` / `AuditLog` | 3 角色账号；审计含 actor/action/entity/detail/layer（http / domain / seed） |
+
+## 7.1 批次执行归属、接管续跑与结果围栏
+
+采集批次是会「跑到一半实例失联」的长任务，因此 `ExtractionRun` 不只是结果行，而是一个带租约的执行实体。
+
+### 批次身份（幂等提交）
+
+- `batch_key = "{template_id}:{snapshot_id}"`，唯一索引 `uq_run_batch_key`。
+- `POST /api/runs` 先按 `batch_key` 查找：已存在即复用，响应 `reused=true / created=false`，**不新增批次**。
+- 并发同时插入由唯一索引兜底（savepoint 回滚后读取已有行），两个请求最终落到同一批次。
+- 完整落库的终态批次不会被重复提交重新执行（返回 `outcome=already_completed`）；
+  无完整结果的失败批次（如抓取超时）允许重新提交重跑。
+
+### 执行归属与租约
+
+- 每次领取租约做一次 `lease_token` 比较并交换（CAS）更新：
+  `UPDATE ... WHERE id=? AND lease_token=? SET lease_token=token+1, execution_owner=?, ...`。
+  即使没有行锁，也只有一个实例能把 token 从 N 推到 N+1。
+- 租约有效期内（`lease_expires_at > now`）其他实例提交 / 接管得到 `409 batch_busy`，
+  回包带 `execution_owner`、`lease_expires_at`、`progress_done/total`，前端据此提示而不是另起一批。
+- worker beat 每 20s 跑 `pricelens.sweep_stale_runs`：把心跳超时（租约过期）的 running 批次
+  标记为 `interrupted`，并把对应 attempt 记为 `interrupted`，随后由存活实例接管。
+
+### 断点续跑
+
+- 每抽完一个字段就提交一次进度（`progress_done` + `field_results`），实例崩溃时已完成字段不会回滚。
+- 接管时从 `min(progress_done, len(field_results), progress_total)` 续跑，已完成字段不重复抽取；
+  `resumed_from` 落在 attempt 上供页面展示。
+- 每次尝试生成一条 `ExtractionRunAttempt`（实例、token、进度、续跑点、耗时），旧尝试被接管时标记 `superseded`。
+
+### 晚到结果围栏
+
+- 所有进度 / 终态写入都带 `WHERE lease_token = ?`；租约被接管后旧实例写入影响 0 行，
+  直接放弃并把 attempt 说明为 `lease_lost`，**不会覆盖新实例结果**。
+- 因此「两个实例同时提交」在页面只会有一套结果：唯一有效归属的写入生效，另一份被围栏丢弃。
+
+### 日报口径
+
+- 客户日报只采纳 `result_complete=true` 且状态为 success / failed 的批次，
+  按 `finished_at` 取每站点最新一条完整结果。
+- 有完整历史结果时，执行中的新批次不会顶替日报；从未有完整结果的站点如实标注
+  `batch_executing / batch_interrupted / no_complete_run` 并留空待补，绝不用半成品字段填充。
+- CSV 增加「批次」「归属实例」两列，便于对账时追溯来源。
+
+### 相关接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/runs` | 提交批次（幂等）；执行中重复提交返回 409 + 当前归属 |
+| GET | `/api/runs/:id` | 批次详情：归属、租约、进度、完整标记、执行时间线 |
+| POST | `/api/runs/:id/takeover` | 接管中断 / 租约失效批次并续跑；`force=true` 可强制收回有效租约 |
+| POST | `/api/runs/sweep-stale` | 手工触发心跳超时扫描（等价 worker beat 任务） |
 
 ## 8. 两个核心算法（全部 Python 真算并落库）
 
@@ -144,7 +201,8 @@ gb-562/
 | 严重级 Severity(high/medium/low/none) | `src/constants/enums.py::Severity`、`drift_detector.py` | `src/types/models.ts::Severity`、`src/constants/enums.ts::SEVERITY_LABEL` |
 | 告警状态 AlertStatus(open/accepted/dismissed) | `src/constants/enums.py::AlertStatus` | `src/constants/enums.ts::ALERT_STATUS_LABEL` |
 | 模板状态 TemplateStatus(draft/active/deprecated) | `src/constants/enums.py::TemplateStatus` | `src/constants/enums.ts::TEMPLATE_STATUS_LABEL` |
-| 批次状态 RunStatus(queued/running/success/failed) | `src/constants/enums.py::RunStatus` | `src/constants/enums.ts::RUN_STATUS_LABEL` |
+| 批次状态 RunStatus(queued/running/interrupted/success/failed) | `src/constants/enums.py::RunStatus` | `src/constants/enums.ts::RUN_STATUS_LABEL` |
+| 执行尝试 AttemptStatus(running/succeeded/failed/interrupted/superseded/rejected) | `src/constants/enums.py::AttemptStatus` | `src/constants/enums.ts::ATTEMPT_STATUS_LABEL` |
 | 字段状态 FieldStatus(hit/wrong/miss) | `src/constants/enums.py::FieldStatus`、`extraction_service.py` | `src/constants/enums.ts::FIELD_STATUS_LABEL` |
 | 候选类型 CandidateKind | `src/constants/enums.py::CandidateKind`、`selector_healer.py` | `src/constants/enums.ts::CANDIDATE_KIND_LABEL` |
 
@@ -159,6 +217,8 @@ gb-562/
 | `REDIS_URL` | redis://redis:6379/0 | Celery broker/backend + 限流计数 |
 | `SEED_DEMO` | true | 启动时跑一次幂等 seed |
 | `RATE_LIMIT_PER_MINUTE` / `RATE_LIMIT_RUNS_PER_MINUTE` | 240 / 30 | 全局 / 批次类限流窗口 |
+| `RUN_LEASE_SECONDS` | 30 | 执行租约时长；心跳超时后批次标记 interrupted，可由新实例接管 |
+| `RUN_STEP_DELAY_MS` | 0 | 每个字段抽取后停顿（仅演示执行中进度可见性） |
 
 ## 12. Docker 说明
 
@@ -184,7 +244,7 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 
 测试产物与源码分离，全部在 `batch-20261110d/test-artifacts/gb-562/`：
 
-- `tests/smoke.mjs`：健康检查 / 三账号登录 + 403 权限差异 / 诊断 / 候选 / 应用 v2 / 重跑 / CSV / 审计。
+- `tests/smoke.mjs`：健康检查 / 三账号登录 + 403 权限差异 / 诊断 / 候选 / 应用 v2 / 重跑 / CSV / 审计 / 批次幂等与接管。
 - `tests/screenshots.cjs`：用 `_shared/capture.cjs`（零依赖 CDP + 系统 Chrome）截 6 张 1440×900。
 - `screenshots/01..06-*.png`、`TESTING.md`（环境、真实数值、已知差异）。
 
@@ -192,6 +252,19 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 node test-artifacts/gb-562/tests/smoke.mjs http://localhost:18235
 node test-artifacts/gb-562/tests/screenshots.cjs http://localhost:18235
 ```
+
+### 批次归属回归测试（pytest）
+
+`backend/tests/` 用 SQLite 内存库覆盖并发与围栏语义，不依赖 MySQL / Redis：
+
+```bash
+cd backend && pip install pytest httpx && python -m pytest tests -q
+```
+
+- `test_batch_ownership.py`：幂等提交、有效租约拒绝、过期接管续跑、旧 token 晚到被拒、日报完整性。
+- `test_batch_concurrency.py`：两个独立 session 同时提交同一批 / 同时领取租约，只有一个赢家。
+- `test_run_api.py`：真实 FastAPI 路由（登录 + RBAC）下的 200/409、接管时间线、客户日报与 403。
+- `test_run_attempts.py`：attempt 状态流转与「被拒绝的请求不新增 attempt」。
 
 ## 15. License
 

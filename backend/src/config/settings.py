@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     max_snapshot_bytes: int = 1_048_576
 
+    # 批次执行租约：实例心跳超时后由新实例接管；step delay 仅用于演示「执行中」可见性
+    run_lease_seconds: int = 30
+    run_step_delay_ms: int = 0
+
     @property
     def database_url(self) -> str:
         return (
